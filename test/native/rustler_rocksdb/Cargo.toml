@@ -1,0 +1,27 @@
+[package]
+
+name = "rustler_rocksdb"
+
+version = "0.1.0"
+
+edition = "2021"
+
+
+
+[lib]
+
+name = "rustler_rocksdb"
+
+path = "src/lib.rs"
+
+crate-type = ["cdylib"]
+
+
+
+[dependencies]
+
+rustler = "0.29.0"
+
+rocksdb = "0.23.0"
+
+lazy_static = "1.4.0"
