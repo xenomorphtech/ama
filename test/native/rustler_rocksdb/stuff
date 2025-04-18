@@ -1,0 +1,12 @@
+apis used in amadeus:
+:rocksdb.transaction_get/3 and :rocksdb.transaction_get/4
+:rocksdb.get/3 and :rocksdb.get/4
+:rocksdb.iterator_move/2
+:rocksdb.transaction_put/3 and :rocksdb.transaction_put/4
+:rocksdb.put/4 and :rocksdb.put/5
+:rocksdb.transaction_delete/2 and :rocksdb.transaction_delete/3
+:rocksdb.delete/3 and :rocksdb.delete/4
+:rocksdb.transaction_iterator/2 and :rocksdb.transaction_iterator/3
+:rocksdb.iterator/2 and :rocksdb.iterator/3
+:rocksdb.flush/3
+:rocksdb.compact_range/5

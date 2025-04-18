@@ -15,7 +15,6 @@ lazy_static! {
 }
 
 #[rustler::nif]
-
 fn init(db_path: String) -> NifResult<bool> {
     let mut db_guard = DB_INSTANCE.lock().unwrap();
 
@@ -43,7 +42,6 @@ fn init(db_path: String) -> NifResult<bool> {
 }
 
 #[rustler::nif]
-
 fn get(key: String) -> NifResult<Option<Vec<u8>>> {
     let db_guard = DB_INSTANCE.lock().unwrap();
 
@@ -67,7 +65,6 @@ fn get(key: String) -> NifResult<Option<Vec<u8>>> {
 }
 
 #[rustler::nif]
-
 fn put(key: String, value: Vec<u8>) -> NifResult<bool> {
     let db_guard = DB_INSTANCE.lock().unwrap();
 
