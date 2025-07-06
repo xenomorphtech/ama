@@ -22,6 +22,6 @@ crate-type = ["cdylib"]
 
 rustler = "0.36.0"
 
-rocksdb = "0.23.0"
+rocksdb = { git = "https://github.com/rust-rocksdb/rust-rocksdb", branch = "master" }
 
 lazy_static = "1.4.0"
