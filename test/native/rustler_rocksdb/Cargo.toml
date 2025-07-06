@@ -20,7 +20,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 
-rustler = "0.29.0"
+rustler = "0.36.0"
 
 rocksdb = "0.23.0"
 
