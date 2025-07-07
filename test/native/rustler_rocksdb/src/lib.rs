@@ -14,9 +14,40 @@ use rustler::Binary;
 use rustler::OwnedBinary;
 
 use rocksdb::{Options, DB};
+use rocksdb::Direction;
+use rustler::types::atom;
+//use rustler::types::tuple;
+use rustler::ListIterator;
+use rocksdb::DBIterator;
+use rustler::ResourceArc;
+use rocksdb::IteratorMode;
+use rocksdb::ReadOptions;
 
 lazy_static! {
     static ref DB_INSTANCE: Mutex<Option<DB>> = Mutex::new(None);
+}
+
+mod atoms {
+    rustler::atoms! {
+        // General atoms
+        ok,
+        error,
+        finished,
+
+        // Iterator option atoms
+        iterator_mode,
+        start,
+        end,
+        from,
+
+        // Direction atoms
+        forward,
+        reverse,
+        next,
+        prev,
+        first,
+        last,
+    }
 }
 
 // Helper to convert Elixir binary to Vec<u8>
@@ -138,13 +169,6 @@ fn get_4(_key: String, _opts: Term, _cf: String)
     Err(Error::Atom("not_implemented"))
 }
 
-#[rustler::nif(name = "iterator_move_2")]
-fn iterator_move_2(_iterator: Term, _direction: Term)
-    -> NifResult<bool>
-{
-    Err(Error::Atom("not_implemented"))
-}
-
 #[rustler::nif(name = "transaction_put_3")]
 fn transaction_put_3(_txn_id: String, _key: String, _value: Vec<u8>)
     -> NifResult<bool>
@@ -215,18 +239,128 @@ fn transaction_iterator_3<'a>(env: Env<'a>, _txn_id: String, _opts: Term<'a>)
     Err(Error::Atom("not_implemented"))
 }
 
-#[rustler::nif(name = "iterator_2")]
-fn iterator_2<'a>(env: Env<'a>, _opts: Term<'a>)
-     -> NifResult<Term<'a>>
-{
-    Err(Error::Atom("not_implemented"))
+pub struct IteratorResource {
+    // The iterator has a lifetime dependency on the DB instance.
+    // Since the DB is in a lazy_static, it will live for the lifetime of the
+    // program. We can use `unsafe` to extend the iterator's lifetime to `'static`.
+    // This is safe as long as the DB is not closed while iterators exist.
+    iter: Mutex<DBIterator<'static>>,
 }
 
-#[rustler::nif(name = "iterator_3")]
-fn iterator_3<'a>(env: Env<'a>, _opts: Term<'a>, _cf: String)
-     -> NifResult<Term<'a>>
-{
-    Err(Error::Atom("not_implemented"))
+enum ParsedIteratorMode {
+    Start,
+    End,
+    From { key: Vec<u8>, dir: Direction },
+}
+
+fn parse_iterator_opts(env: Env, opts: Term) -> NifResult<ParsedIteratorMode> {
+    let list: ListIterator = opts.decode()?;
+
+    for item in list {
+        let (key_term, value_term) = item.decode::<(Term, Term)>()?;
+        
+        if key_term.decode::<atom::Atom>()? == atoms::iterator_mode() {
+            // Try to decode the value as a simple atom first (e.g., :start, :end)
+            if let Ok(mode_atom) = value_term.decode::<atom::Atom>() {
+                if mode_atom == atoms::start() {
+                    return Ok(ParsedIteratorMode::Start);
+                } else if mode_atom == atoms::end() {
+                    return Ok(ParsedIteratorMode::End);
+                }
+            // Otherwise, try to decode it as a tuple (e.g., {:from, key, :forward})
+            } else if let Ok((from_atom, key_term, dir_atom)) = value_term.decode::<(atom::Atom, Term, atom::Atom)>() {
+                // Ensure the tuple starts with the :from atom
+                if from_atom == atoms::from() {
+                    let key = binary_to_vec(key_term)?;
+                    let dir = if dir_atom == atoms::reverse() {
+                        Direction::Reverse
+                    } else {
+                        // Default to forward if not reverse
+                        Direction::Forward
+                    };
+                    return Ok(ParsedIteratorMode::From { key, dir });
+                }
+            }
+        }
+    }
+    // Default mode if not specified
+    Ok(ParsedIteratorMode::Start)
+}
+
+#[rustler::nif(name = "iterator")]
+fn iterator(env: Env, opts: Term) -> NifResult<ResourceArc<IteratorResource>> {
+    let db_guard = DB_INSTANCE.lock().unwrap();
+    let db = db_guard.as_ref().ok_or(Error::Atom("db_not_initialized"))?;
+
+    let parsed_mode = parse_iterator_opts(env, opts)?;
+
+    let db_iter = match parsed_mode {
+        ParsedIteratorMode::Start => db.iterator(IteratorMode::Start),
+        ParsedIteratorMode::End => db.iterator(IteratorMode::End),
+        ParsedIteratorMode::From { ref key, dir } => db.iterator(IteratorMode::From(key.as_slice(), dir)),
+    };
+
+    let static_iter: DBIterator<'static> = unsafe { std::mem::transmute(db_iter) };
+    let resource = ResourceArc::new(IteratorResource { iter: Mutex::new(static_iter) });
+    Ok(resource)
+}
+
+#[rustler::nif(name = "iterator_2")]
+fn iterator_2(env: Env, opts: Term, cf_name: String) -> NifResult<ResourceArc<IteratorResource>> {
+    let db_guard = DB_INSTANCE.lock().unwrap();
+    let db = db_guard.as_ref().ok_or(Error::Atom("db_not_initialized"))?;
+    let cf = db.cf_handle(&cf_name).ok_or_else(|| Error::Term(Box::new("Column family not found")))?;
+    let parsed_mode = parse_iterator_opts(env, opts)?;
+    let read_opts = ReadOptions::default();
+
+    let db_iter = match parsed_mode {
+        ParsedIteratorMode::Start => db.iterator_cf_opt(cf, read_opts, IteratorMode::Start),
+        ParsedIteratorMode::End => db.iterator_cf_opt(cf, read_opts, IteratorMode::End),
+        ParsedIteratorMode::From { ref key, dir } => db.iterator_cf_opt(cf, read_opts, IteratorMode::From(key.as_slice(), dir)),
+    };
+
+    let static_iter: DBIterator<'static> = unsafe { std::mem::transmute(db_iter) };
+    let resource = ResourceArc::new(IteratorResource { iter: Mutex::new(static_iter) });
+    Ok(resource)
+}
+
+/// Moves the iterator to the next position.
+///
+/// This is a specialized and slightly more efficient version of `iterator_move(iter, :next)`.
+///
+/// Returns `{:ok, {key, value}}` if the iterator is valid after moving,
+/// or `:finished` if the iterator has moved past the last element.
+#[rustler::nif(name = "iterator_next")]
+fn iterator_next<'a>(env: Env<'a>, iter_res: ResourceArc<IteratorResource>) -> NifResult<Term<'a>> {
+    let iter = &mut *iter_res.iter.lock().unwrap();
+ 
+    // Call next() and handle its rich return type directly.
+    match iter.next() {
+        // Case 1: Successfully got the next key-value pair.
+        Some(Ok((key, value))) => {
+            // The key and value are Box<[u8]>, which can be encoded directly.
+            let mut key_binary = rustler::OwnedBinary::new(key.len()).unwrap();
+            key_binary.as_mut_slice().copy_from_slice(&key);
+
+            let mut value_binary = rustler::OwnedBinary::new(value.len()).unwrap();
+            value_binary.as_mut_slice().copy_from_slice(&value);
+
+            let ok_atom = atoms::ok().encode(env);
+            let key_term = key_binary.release(env).encode(env);
+            let value_term = value_binary.release(env).encode(env);
+            
+            let data_tuple = rustler::types::tuple::make_tuple(env, &[key_term, value_term]);
+            Ok(rustler::types::tuple::make_tuple(env, &[ok_atom, data_tuple]))
+        }
+        // Case 2: An error occurred during iteration.
+        Some(Err(e)) => {
+            Err(Error::Term(Box::new(format!("RocksDB iteration error: {}", e))))
+        }
+        // Case 3: The iterator reached the end.
+        None => {
+            Ok(atoms::finished().encode(env))
+        }
+    }
 }
 
 #[rustler::nif(name = "flush_3")]
@@ -243,7 +377,12 @@ fn compact_range_5(_start: Term, _end: Term, _opts: Term, _cf: String, _output_l
     Err(Error::Atom("not_implemented"))
 }
 
+fn load(env: Env, _: Term) -> bool {
+     let _ = rustler::resource!(IteratorResource, env);
+     true
+}
+
 // ---------- Rustler exports ----------
-rustler::init!("Elixir.RustlerRocksDB");
+rustler::init!("Elixir.RustlerRocksDB", load = load);
 
 
