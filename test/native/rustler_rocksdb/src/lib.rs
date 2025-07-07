@@ -1,66 +1,276 @@
-#![allow(unused_variables)]
-#![allow(dead_code)]
+// lib.rs
 
-use rustler::Error;
-use rustler::{Encoder, Env, NifResult, Term};
-
+use rustler::{
+    Atom, Binary, Encoder, Env, Error, ListIterator, NifResult, OwnedBinary, ResourceArc, Term,
+};
+use rustler::types::atom;
 use std::sync::Mutex;
 
-use lazy_static::lazy_static;
-
+use rocksdb::Transaction;
+use rocksdb::BoundColumnFamily;
+use rocksdb::{
+    ColumnFamily, ColumnFamilyDescriptor, DBAccess, Direction, IteratorMode, MultiThreaded,
+    OptimisticTransactionDB, OptimisticTransactionOptions, Options, ReadOptions, WriteOptions,
+    DBIterator,
+};
 use std::path::Path;
+use rocksdb::DBCommon;
+// --- NIF Resources ---
+use std::sync::Arc;
 
-use rustler::Binary;
-use rustler::OwnedBinary;
-
-use rocksdb::Direction;
-use rocksdb::{Options, DB};
-use rustler::types::atom;
-//use rustler::types::tuple;
-use rocksdb::DBIterator;
-use rocksdb::IteratorMode;
-use rocksdb::ReadOptions;
-use rustler::ListIterator;
-use rustler::ResourceArc;
-
-lazy_static! {
-    static ref DB_INSTANCE: Mutex<Option<DB>> = Mutex::new(None);
+/// A resource holding a thread-safe reference to an open OptimisticTransactionDB.
+pub struct DbResource {
+    pub db: OptimisticTransactionDB<MultiThreaded>
 }
+
+/// A resource holding a transaction.
+/// A transaction's lifetime is tied to its parent DB. By holding a `ResourceArc<DbResource>`,
+/// we ensure the DB is not garbage collected by the BEAM while a transaction is still live.
+/// The transaction itself is wrapped in a `Mutex<Option<...>>` to allow it to be
+/// consumed by `commit` or `rollback` operations.
+pub struct TransactionResource {
+    // A transaction's lifetime is tied to its DB.
+    // By holding a `ResourceArc<DbResource>`, we guarantee the DB is not
+    // garbage collected while this transaction resource exists.
+    _db_holder: ResourceArc<DbResource>,
+
+    // The transaction object itself. We wrap it in a Mutex and Option
+    // so we can "take" it when we commit or rollback, preventing reuse.
+    // The lifetime is 'static because we've guaranteed safety with `_db_holder`.
+    txn: Mutex<Option<Transaction<'static, OptimisticTransactionDB<MultiThreaded>>>>,
+}
+
+struct IteratorResource {
+    iter: Mutex<DBIterator<'static>>,
+    _db_holder: ResourceArc<DbResource>,
+}
+
+fn load(env: Env, _: Term) -> bool {
+    // Use the `resource!` macro to implement the `Resource` trait for your structs.
+    rustler::resource!(DbResource, env);
+    rustler::resource!(TransactionResource, env);
+    rustler::resource!(IteratorResource, env); // Don't forget this one too!
+    true
+}
+
+// --- Atoms ---
 
 mod atoms {
     rustler::atoms! {
         // General atoms
         ok,
         error,
+        nil,
         finished,
 
-        // Iterator option atoms
+        // Option key atoms
+        create_if_missing,
+        create_missing_column_families,
+        target_file_size_base,
+        target_file_size_multiplier,
+
+        // Iterator control atoms
         iterator_mode,
         start,
         end,
         from,
-
-        // Direction atoms
         forward,
         reverse,
         next,
-        prev,
-        first,
-        last,
     }
 }
 
-// Helper to convert Elixir binary to Vec<u8>
-fn binary_to_vec(binary: Term) -> NifResult<Vec<u8>> {
-    if binary.is_binary() {
-        let binary: Binary = binary.decode()?;
-        Ok(binary.as_slice().to_vec())
+/// Parses a keyword list of options from Elixir into a `rocksdb::Options` struct.
+fn parse_db_options(opts_term: Term) -> NifResult<Options> {
+    let mut opts = Options::default();
+    if !opts_term.is_list() {
+        return Ok(opts);
+    }
+    let opts_iter: ListIterator = opts_term.decode()?;
+
+    for opt_term in opts_iter {
+        let (key, value): (atom::Atom, Term) = opt_term.decode()?;
+
+        if key == atoms::create_if_missing() {
+            opts.create_if_missing(value.decode()?);
+        } else if key == atoms::create_missing_column_families() {
+            opts.create_missing_column_families(value.decode()?);
+        } else if key == atoms::target_file_size_base() {
+            opts.set_target_file_size_base(value.decode()?);
+        } else if key == atoms::target_file_size_multiplier() {
+            opts.set_target_file_size_multiplier(value.decode()?);
+        }
+        // Add more supported DB options here...
+    }
+    Ok(opts)
+}
+
+fn to_nif_err(err: rocksdb::Error) -> Error {
+    Error::Term(Box::new(err.to_string()))
+}
+
+/// A helper to safely get a `ColumnFamily` handle from a `DbResource`.
+fn get_cf_handle<'a>(db_res: &'a DbResource, cf_name: &'a str) -> NifResult<Arc<BoundColumnFamily<'a>>> {
+    db_res
+        .db
+        .cf_handle(cf_name)
+        .ok_or_else(|| Error::Term(Box::new(format!("Column family not found: {}", cf_name))))
+}
+
+#[rustler::nif]
+fn put_cf(
+    db_res: ResourceArc<DbResource>,
+    cf_name: String,
+    key: Binary,
+    value: Binary,
+) -> NifResult<atom::Atom> {
+    // `get_cf_handle` now returns an `Arc<ColumnFamily>`.
+    let cf_handle: Arc<BoundColumnFamily> = get_cf_handle(&db_res, &cf_name)?;
+
+    // When we pass `cf_handle` to `put_cf`, the compiler automatically
+    // dereferences it from `Arc<ColumnFamily>` to the `&ColumnFamily` that the method expects.
+    // No change is needed in this line!
+    db_res
+        .db
+        .put_cf(&cf_handle, key.as_slice(), value.as_slice())
+        .map(|_| atoms::ok())
+        .map_err(to_nif_err)
+}
+
+#[rustler::nif]
+fn get_cf<'a>(
+    env: Env<'a>,
+    db_res: ResourceArc<DbResource>,
+    cf_name: String,
+    key: Binary,
+) -> NifResult<Term<'a>> {
+    let cf_handle = get_cf_handle(&db_res, &cf_name)?; // This is now an Arc
+    match db_res.db.get_cf(&cf_handle, key.as_slice()) {    // Pass it as a reference
+        Ok(Some(value)) => {
+            let mut bin = OwnedBinary::new(value.len()).unwrap();
+            bin.as_mut_slice().copy_from_slice(&value);
+            Ok((atoms::ok(), bin.release(env)).encode(env))
+        }
+        Ok(None) => Ok((atoms::ok(), atoms::nil()).encode(env)),
+        Err(e) => Err(to_nif_err(e)),
+    }
+}
+
+#[rustler::nif]
+fn delete_cf(db_res: ResourceArc<DbResource>, cf_name: String, key: Binary) -> NifResult<atom::Atom> {
+    let cf = get_cf_handle(&db_res, &cf_name)?;
+    db_res
+        .db
+        .delete_cf(&cf, key.as_slice())
+        .map(|_| atoms::ok())
+        .map_err(to_nif_err)
+}
+
+#[rustler::nif]
+fn begin_transaction<'a>(env: Env<'a>, db_res: ResourceArc<DbResource>) -> NifResult<Term<'a>> {
+    let db = &db_res.db;
+    let write_opts = WriteOptions::default();
+    let tx_opts = OptimisticTransactionOptions::default();
+
+    // The transaction's lifetime is bound to `db`. We use `unsafe transmute` to make it
+    // `'static` because `TransactionResource` holds a `ResourceArc` to the DB,
+    // guaranteeing the DB lives as long as the transaction resource.
+    let txn = db.transaction_opt(&write_opts, &tx_opts);
+    let static_txn: Transaction<'static, _> = unsafe { std::mem::transmute(txn) };
+
+    let txn_res = ResourceArc::new(TransactionResource {
+        txn: Mutex::new(Some(static_txn)),
+        _db_holder: db_res.clone(),
+    });
+
+    Ok((atoms::ok(), txn_res).encode(env))
+}
+
+/// Commits a transaction. The transaction resource cannot be used after this call.
+#[rustler::nif]
+fn commit_transaction(txn_res: ResourceArc<TransactionResource>) -> NifResult<atom::Atom> {
+    let mut guard = txn_res.txn.lock().unwrap();
+    if let Some(txn) = guard.take() {
+        txn.commit().map(|_| atoms::ok()).map_err(to_nif_err)
     } else {
-        Err(Error::Term(Box::new("Expected binary")))
+        Err(Error::Atom("transaction_already_consumed"))
     }
 }
 
-// Helper to convert Vec<u8> to Elixir binary
+/// Rolls back a transaction. The transaction resource cannot be used after this call.
+#[rustler::nif]
+fn rollback_transaction(txn_res: ResourceArc<TransactionResource>) -> NifResult<atom::Atom> {
+    let mut guard = txn_res.txn.lock().unwrap();
+    if let Some(txn) = guard.take() {
+        txn.rollback().map(|_| atoms::ok()).map_err(to_nif_err)
+    } else {
+        Err(Error::Atom("transaction_already_consumed"))
+    }
+}
+
+/// Puts a key-value pair into a column family within a transaction.
+#[rustler::nif]
+fn transaction_put_cf(
+    txn_res: ResourceArc<TransactionResource>,
+    cf_name: String,
+    key: Binary,
+    value: Binary,
+) -> NifResult<atom::Atom> {
+    let mut guard = txn_res.txn.lock().unwrap();
+    if let Some(txn) = guard.as_mut() {
+        let cf = get_cf_handle(&txn_res._db_holder, &cf_name)?;
+        txn.put_cf(&cf, key.as_slice(), value.as_slice())
+            .map(|_| atoms::ok())
+            .map_err(to_nif_err)
+    } else {
+        Err(Error::Atom("transaction_already_consumed"))
+    }
+}
+
+/// Gets a value by key from a column family within a transaction.
+#[rustler::nif]
+fn transaction_get_cf<'a>(
+    env: Env<'a>,
+    txn_res: ResourceArc<TransactionResource>,
+    cf_name: String,
+    key: Binary,
+) -> NifResult<Term<'a>> {
+    let mut guard = txn_res.txn.lock().unwrap();
+    if let Some(txn) = guard.as_mut() {
+        let cf = get_cf_handle(&txn_res._db_holder, &cf_name)?;
+        match txn.get_cf(&cf, key.as_slice()) {
+            Ok(Some(value)) => {
+                let mut bin = OwnedBinary::new(value.len()).unwrap();
+                bin.as_mut_slice().copy_from_slice(&value);
+                Ok((atoms::ok(), bin.release(env)).encode(env))
+            }
+            Ok(None) => Ok((atoms::ok(), atoms::nil()).encode(env)),
+            Err(e) => Err(to_nif_err(e)),
+        }
+    } else {
+        Err(Error::Atom("transaction_already_consumed"))
+    }
+}
+
+/// Creates a new iterator over a column family.
+#[rustler::nif]
+fn iterator_cf<'a>(
+    env: Env<'a>,
+    db_res: ResourceArc<DbResource>,
+    cf_name: String,
+) -> NifResult<Term<'a>> {
+    let cf = get_cf_handle(&db_res, &cf_name)?;
+    let iter = db_res.db.iterator_cf(&cf, IteratorMode::Start);
+    let static_iter: DBIterator = unsafe { std::mem::transmute(iter) };
+
+    let iter_res = ResourceArc::new(IteratorResource {
+        iter: Mutex::new(static_iter),
+        _db_holder: db_res.clone(),
+    });
+
+    Ok((atoms::ok(), iter_res).encode(env))
+}
+
 fn vec_to_binary<'a>(env: Env<'a>, data: Vec<u8>) -> NifResult<Term<'a>> {
     let mut binary = OwnedBinary::new(data.len())
         .ok_or_else(|| Error::Term(Box::new("Failed to allocate binary")))?;
@@ -68,321 +278,24 @@ fn vec_to_binary<'a>(env: Env<'a>, data: Vec<u8>) -> NifResult<Term<'a>> {
     Ok(binary.release(env).encode(env))
 }
 
-#[rustler::nif]
-fn init(db_path: String) -> NifResult<bool> {
-    let mut db_guard = DB_INSTANCE.lock().unwrap();
-
-    // Create RocksDB options
-
-    let mut options = Options::default();
-
-    options.create_if_missing(true);
-
-    // Open the database
-
-    match DB::open(&options, Path::new(&db_path)) {
-        Ok(db) => {
-            *db_guard = Some(db);
-
-            Ok(true)
-        }
-
-        Err(e) => {
-            eprintln!("Failed to open RocksDB: {:?}", e);
-
-            Ok(false)
-        }
-    }
-}
-
-#[rustler::nif]
-fn get(key: String) -> NifResult<Option<Vec<u8>>> {
-    let db_guard = DB_INSTANCE.lock().unwrap();
-
-    if let Some(db) = db_guard.as_ref() {
-        match db.get(key.as_bytes()) {
-            Ok(Some(value)) => Ok(Some(value)),
-
-            Ok(None) => Ok(None),
-
-            Err(e) => {
-                eprintln!("Error getting value: {:?}", e);
-
-                Ok(None)
-            }
-        }
-    } else {
-        eprintln!("Database not initialized");
-
-        Ok(None)
-    }
-}
-
-#[rustler::nif]
-fn put(key: String, value: Vec<u8>) -> NifResult<bool> {
-    let db_guard = DB_INSTANCE.lock().unwrap();
-
-    if let Some(db) = db_guard.as_ref() {
-        match db.put(key.as_bytes(), value) {
-            Ok(_) => Ok(true),
-
-            Err(e) => {
-                eprintln!("Error putting value: {:?}", e);
-
-                Ok(false)
-            }
-        }
-    } else {
-        eprintln!("Database not initialized");
-
-        Ok(false)
-    }
-}
-
-// ------------------------ NIF skeletons ------------------------
-
-#[rustler::nif(name = "transaction_get_3")]
-fn transaction_get_3(_txn_id: String, _key: String, _opts: Term) -> NifResult<Option<Vec<u8>>> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "transaction_get_4")]
-fn transaction_get_4(
-    _txn_id: String,
-    _key: String,
-    _opts: Term,
-    _cf: String,
-) -> NifResult<Option<Vec<u8>>> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "get_3")]
-fn get_3(_key: String, _opts: Term) -> NifResult<Option<Vec<u8>>> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "get_4")]
-fn get_4(_key: String, _opts: Term, _cf: String) -> NifResult<Option<Vec<u8>>> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "transaction_put_3")]
-fn transaction_put_3(_txn_id: String, _key: String, _value: Vec<u8>) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "transaction_put_4")]
-fn transaction_put_4(
-    _txn_id: String,
-    _key: String,
-    _value: Vec<u8>,
-    _opts: Term,
-) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "put_4")]
-fn put_4(_key: String, _value: Vec<u8>, _opts: Term) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "put_5")]
-fn put_5(_key: String, _value: Vec<u8>, _opts: Term, _cf: String) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "transaction_delete_2")]
-fn transaction_delete_2(_txn_id: String, _key: String) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "transaction_delete_3")]
-fn transaction_delete_3(_txn_id: String, _key: String, _opts: Term) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "delete_3")]
-fn delete_3(_key: String, _opts: Term) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "delete_4")]
-fn delete_4(_key: String, _opts: Term, _cf: String) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "transaction_iterator_2")]
-fn transaction_iterator_2(env: Env, _txn_id: String) -> NifResult<Term> {
-    Err(Error::Atom("not_implemented"))
-}
-
-#[rustler::nif(name = "transaction_iterator_3")]
-fn transaction_iterator_3<'a>(
-    env: Env<'a>,
-    _txn_id: String,
-    _opts: Term<'a>,
-) -> NifResult<Term<'a>> {
-    Err(Error::Atom("not_implemented"))
-}
-
-pub struct IteratorResource {
-    // The iterator has a lifetime dependency on the DB instance.
-    // Since the DB is in a lazy_static, it will live for the lifetime of the
-    // program. We can use `unsafe` to extend the iterator's lifetime to `'static`.
-    // This is safe as long as the DB is not closed while iterators exist.
-    iter: Mutex<DBIterator<'static>>,
-}
-
-enum ParsedIteratorMode {
-    Start,
-    End,
-    From { key: Vec<u8>, dir: Direction },
-}
-
-fn parse_iterator_opts(env: Env, opts: Term) -> NifResult<ParsedIteratorMode> {
-    let list: ListIterator = opts.decode()?;
-
-    for item in list {
-        let (key_term, value_term) = item.decode::<(Term, Term)>()?;
-
-        if key_term.decode::<atom::Atom>()? == atoms::iterator_mode() {
-            // Try to decode the value as a simple atom first (e.g., :start, :end)
-            if let Ok(mode_atom) = value_term.decode::<atom::Atom>() {
-                if mode_atom == atoms::start() {
-                    return Ok(ParsedIteratorMode::Start);
-                } else if mode_atom == atoms::end() {
-                    return Ok(ParsedIteratorMode::End);
-                }
-            // Otherwise, try to decode it as a tuple (e.g., {:from, key, :forward})
-            } else if let Ok((from_atom, key_term, dir_atom)) =
-                value_term.decode::<(atom::Atom, Term, atom::Atom)>()
-            {
-                // Ensure the tuple starts with the :from atom
-                if from_atom == atoms::from() {
-                    let key = binary_to_vec(key_term)?;
-                    let dir = if dir_atom == atoms::reverse() {
-                        Direction::Reverse
-                    } else {
-                        // Default to forward if not reverse
-                        Direction::Forward
-                    };
-                    return Ok(ParsedIteratorMode::From { key, dir });
-                }
-            }
-        }
-    }
-    // Default mode if not specified
-    Ok(ParsedIteratorMode::Start)
-}
-
-#[rustler::nif(name = "iterator")]
-fn iterator(env: Env, opts: Term) -> NifResult<ResourceArc<IteratorResource>> {
-    let db_guard = DB_INSTANCE.lock().unwrap();
-    let db = db_guard.as_ref().ok_or(Error::Atom("db_not_initialized"))?;
-
-    let parsed_mode = parse_iterator_opts(env, opts)?;
-
-    let db_iter = match parsed_mode {
-        ParsedIteratorMode::Start => db.iterator(IteratorMode::Start),
-        ParsedIteratorMode::End => db.iterator(IteratorMode::End),
-        ParsedIteratorMode::From { ref key, dir } => {
-            db.iterator(IteratorMode::From(key.as_slice(), dir))
-        }
-    };
-
-    let static_iter: DBIterator<'static> = unsafe { std::mem::transmute(db_iter) };
-    let resource = ResourceArc::new(IteratorResource {
-        iter: Mutex::new(static_iter),
-    });
-    Ok(resource)
-}
-
-#[rustler::nif(name = "iterator_2")]
-fn iterator_2(env: Env, opts: Term, cf_name: String) -> NifResult<ResourceArc<IteratorResource>> {
-    let db_guard = DB_INSTANCE.lock().unwrap();
-    let db = db_guard.as_ref().ok_or(Error::Atom("db_not_initialized"))?;
-    let cf = db
-        .cf_handle(&cf_name)
-        .ok_or_else(|| Error::Term(Box::new("Column family not found")))?;
-    let parsed_mode = parse_iterator_opts(env, opts)?;
-    let read_opts = ReadOptions::default();
-
-    let db_iter = match parsed_mode {
-        ParsedIteratorMode::Start => db.iterator_cf_opt(cf, read_opts, IteratorMode::Start),
-        ParsedIteratorMode::End => db.iterator_cf_opt(cf, read_opts, IteratorMode::End),
-        ParsedIteratorMode::From { ref key, dir } => {
-            db.iterator_cf_opt(cf, read_opts, IteratorMode::From(key.as_slice(), dir))
-        }
-    };
-
-    let static_iter: DBIterator<'static> = unsafe { std::mem::transmute(db_iter) };
-    let resource = ResourceArc::new(IteratorResource {
-        iter: Mutex::new(static_iter),
-    });
-    Ok(resource)
-}
-
-/// Moves the iterator to the next position.
+/// Moves the iterator to the next key-value pair.
 ///
-/// This is a specialized and slightly more efficient version of `iterator_move(iter, :next)`.
-///
-/// Returns `{:ok, {key, value}}` if the iterator is valid after moving,
-/// or `:finished` if the iterator has moved past the last element.
-#[rustler::nif(name = "iterator_next")]
+/// Returns `{:ok, {key, value}}` or `:finished`.
+#[rustler::nif]
 fn iterator_next<'a>(env: Env<'a>, iter_res: ResourceArc<IteratorResource>) -> NifResult<Term<'a>> {
-    let iter = &mut *iter_res.iter.lock().unwrap();
-
-    // Call next() and handle its rich return type directly.
-    match iter.next() {
-        // Case 1: Successfully got the next key-value pair.
+    let mut guard = iter_res.iter.lock().unwrap();
+    match guard.next() {
         Some(Ok((key, value))) => {
-            // The key and value are Box<[u8]>, which can be encoded directly.
-            let mut key_binary = rustler::OwnedBinary::new(key.len()).unwrap();
-            key_binary.as_mut_slice().copy_from_slice(&key);
-
-            let mut value_binary = rustler::OwnedBinary::new(value.len()).unwrap();
-            value_binary.as_mut_slice().copy_from_slice(&value);
-
-            let ok_atom = atoms::ok().encode(env);
-            let key_term = key_binary.release(env).encode(env);
-            let value_term = value_binary.release(env).encode(env);
-
-            let data_tuple = rustler::types::tuple::make_tuple(env, &[key_term, value_term]);
-            Ok(rustler::types::tuple::make_tuple(
-                env,
-                &[ok_atom, data_tuple],
-            ))
+            let key_bin = vec_to_binary(env, key.to_vec())?;
+            let val_bin = vec_to_binary(env, value.to_vec())?;
+            Ok((key_bin, val_bin).encode(env))
         }
-        // Case 2: An error occurred during iteration.
-        Some(Err(e)) => Err(Error::Term(Box::new(format!(
-            "RocksDB iteration error: {}",
-            e
-        )))),
-        // Case 3: The iterator reached the end.
+        Some(Err(e)) => Err(to_nif_err(e)),
         None => Ok(atoms::finished().encode(env)),
     }
 }
 
-#[rustler::nif(name = "flush_3")]
-fn flush_3(_opts: Term, _wait: bool) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
+rustler::init! {
+    "Elixir.RustlerRocksDB",
+    load = load
 }
-
-#[rustler::nif(name = "compact_range_5")]
-fn compact_range_5(
-    _start: Term,
-    _end: Term,
-    _opts: Term,
-    _cf: String,
-    _output_level: i32,
-) -> NifResult<bool> {
-    Err(Error::Atom("not_implemented"))
-}
-
-fn load(env: Env, _: Term) -> bool {
-    let _ = rustler::resource!(IteratorResource, env);
-    true
-}
-
-// ---------- Rustler exports ----------
-rustler::init!("Elixir.RustlerRocksDB", load = load);
