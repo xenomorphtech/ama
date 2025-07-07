@@ -1,4 +1,4 @@
-use rocksdb::{DB, IteratorMode, Options};
+use rocksdb::{IteratorMode, Options, DB};
 use std::env;
 
 /// A command-line tool to list all column families and their contents in a RocksDB database.
@@ -41,6 +41,9 @@ fn main() {
 
             // --- 4. Iterate Through Each Column Family ---
             for cf_name in &cf_names {
+                if cf_name == "default" {
+                    continue;
+                }
                 println!("\n--- Contents of Column Family: '{}' ---", cf_name);
 
                 // To iterate over a specific CF, we first need a "handle" to it.

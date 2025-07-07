@@ -1,8 +1,8 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
+use rustler::Error;
 use rustler::{Encoder, Env, NifResult, Term};
-use rustler::{Error};
 
 use std::sync::Mutex;
 
@@ -13,15 +13,15 @@ use std::path::Path;
 use rustler::Binary;
 use rustler::OwnedBinary;
 
-use rocksdb::{Options, DB};
 use rocksdb::Direction;
+use rocksdb::{Options, DB};
 use rustler::types::atom;
 //use rustler::types::tuple;
-use rustler::ListIterator;
 use rocksdb::DBIterator;
-use rustler::ResourceArc;
 use rocksdb::IteratorMode;
 use rocksdb::ReadOptions;
+use rustler::ListIterator;
+use rustler::ResourceArc;
 
 lazy_static! {
     static ref DB_INSTANCE: Mutex<Option<DB>> = Mutex::new(None);
@@ -142,100 +142,86 @@ fn put(key: String, value: Vec<u8>) -> NifResult<bool> {
 // ------------------------ NIF skeletons ------------------------
 
 #[rustler::nif(name = "transaction_get_3")]
-fn transaction_get_3(_txn_id: String, _key: String, _opts: Term)
-    -> NifResult<Option<Vec<u8>>>
-{
+fn transaction_get_3(_txn_id: String, _key: String, _opts: Term) -> NifResult<Option<Vec<u8>>> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "transaction_get_4")]
-fn transaction_get_4(_txn_id: String, _key: String, _opts: Term, _cf: String)
-    -> NifResult<Option<Vec<u8>>>
-{
+fn transaction_get_4(
+    _txn_id: String,
+    _key: String,
+    _opts: Term,
+    _cf: String,
+) -> NifResult<Option<Vec<u8>>> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "get_3")]
-fn get_3(_key: String, _opts: Term)
-    -> NifResult<Option<Vec<u8>>>
-{
+fn get_3(_key: String, _opts: Term) -> NifResult<Option<Vec<u8>>> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "get_4")]
-fn get_4(_key: String, _opts: Term, _cf: String)
-    -> NifResult<Option<Vec<u8>>>
-{
+fn get_4(_key: String, _opts: Term, _cf: String) -> NifResult<Option<Vec<u8>>> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "transaction_put_3")]
-fn transaction_put_3(_txn_id: String, _key: String, _value: Vec<u8>)
-    -> NifResult<bool>
-{
+fn transaction_put_3(_txn_id: String, _key: String, _value: Vec<u8>) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "transaction_put_4")]
-fn transaction_put_4(_txn_id: String, _key: String, _value: Vec<u8>, _opts: Term)
-    -> NifResult<bool>
-{
+fn transaction_put_4(
+    _txn_id: String,
+    _key: String,
+    _value: Vec<u8>,
+    _opts: Term,
+) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "put_4")]
-fn put_4(_key: String, _value: Vec<u8>, _opts: Term)
-    -> NifResult<bool>
-{
+fn put_4(_key: String, _value: Vec<u8>, _opts: Term) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "put_5")]
-fn put_5(_key: String, _value: Vec<u8>, _opts: Term, _cf: String)
-    -> NifResult<bool>
-{
+fn put_5(_key: String, _value: Vec<u8>, _opts: Term, _cf: String) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "transaction_delete_2")]
-fn transaction_delete_2(_txn_id: String, _key: String)
-    -> NifResult<bool>
-{
+fn transaction_delete_2(_txn_id: String, _key: String) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "transaction_delete_3")]
-fn transaction_delete_3(_txn_id: String, _key: String, _opts: Term)
-    -> NifResult<bool>
-{
+fn transaction_delete_3(_txn_id: String, _key: String, _opts: Term) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "delete_3")]
-fn delete_3(_key: String, _opts: Term)
-    -> NifResult<bool>
-{
+fn delete_3(_key: String, _opts: Term) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "delete_4")]
-fn delete_4(_key: String, _opts: Term, _cf: String)
-    -> NifResult<bool>
-{
+fn delete_4(_key: String, _opts: Term, _cf: String) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "transaction_iterator_2")]
-fn transaction_iterator_2(env: Env, _txn_id: String)
-    -> NifResult<Term>
-{
+fn transaction_iterator_2(env: Env, _txn_id: String) -> NifResult<Term> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "transaction_iterator_3")]
-fn transaction_iterator_3<'a>(env: Env<'a>, _txn_id: String, _opts: Term<'a>)
-    -> NifResult<Term<'a>>
-{
+fn transaction_iterator_3<'a>(
+    env: Env<'a>,
+    _txn_id: String,
+    _opts: Term<'a>,
+) -> NifResult<Term<'a>> {
     Err(Error::Atom("not_implemented"))
 }
 
@@ -258,7 +244,7 @@ fn parse_iterator_opts(env: Env, opts: Term) -> NifResult<ParsedIteratorMode> {
 
     for item in list {
         let (key_term, value_term) = item.decode::<(Term, Term)>()?;
-        
+
         if key_term.decode::<atom::Atom>()? == atoms::iterator_mode() {
             // Try to decode the value as a simple atom first (e.g., :start, :end)
             if let Ok(mode_atom) = value_term.decode::<atom::Atom>() {
@@ -268,7 +254,9 @@ fn parse_iterator_opts(env: Env, opts: Term) -> NifResult<ParsedIteratorMode> {
                     return Ok(ParsedIteratorMode::End);
                 }
             // Otherwise, try to decode it as a tuple (e.g., {:from, key, :forward})
-            } else if let Ok((from_atom, key_term, dir_atom)) = value_term.decode::<(atom::Atom, Term, atom::Atom)>() {
+            } else if let Ok((from_atom, key_term, dir_atom)) =
+                value_term.decode::<(atom::Atom, Term, atom::Atom)>()
+            {
                 // Ensure the tuple starts with the :from atom
                 if from_atom == atoms::from() {
                     let key = binary_to_vec(key_term)?;
@@ -297,11 +285,15 @@ fn iterator(env: Env, opts: Term) -> NifResult<ResourceArc<IteratorResource>> {
     let db_iter = match parsed_mode {
         ParsedIteratorMode::Start => db.iterator(IteratorMode::Start),
         ParsedIteratorMode::End => db.iterator(IteratorMode::End),
-        ParsedIteratorMode::From { ref key, dir } => db.iterator(IteratorMode::From(key.as_slice(), dir)),
+        ParsedIteratorMode::From { ref key, dir } => {
+            db.iterator(IteratorMode::From(key.as_slice(), dir))
+        }
     };
 
     let static_iter: DBIterator<'static> = unsafe { std::mem::transmute(db_iter) };
-    let resource = ResourceArc::new(IteratorResource { iter: Mutex::new(static_iter) });
+    let resource = ResourceArc::new(IteratorResource {
+        iter: Mutex::new(static_iter),
+    });
     Ok(resource)
 }
 
@@ -309,18 +301,24 @@ fn iterator(env: Env, opts: Term) -> NifResult<ResourceArc<IteratorResource>> {
 fn iterator_2(env: Env, opts: Term, cf_name: String) -> NifResult<ResourceArc<IteratorResource>> {
     let db_guard = DB_INSTANCE.lock().unwrap();
     let db = db_guard.as_ref().ok_or(Error::Atom("db_not_initialized"))?;
-    let cf = db.cf_handle(&cf_name).ok_or_else(|| Error::Term(Box::new("Column family not found")))?;
+    let cf = db
+        .cf_handle(&cf_name)
+        .ok_or_else(|| Error::Term(Box::new("Column family not found")))?;
     let parsed_mode = parse_iterator_opts(env, opts)?;
     let read_opts = ReadOptions::default();
 
     let db_iter = match parsed_mode {
         ParsedIteratorMode::Start => db.iterator_cf_opt(cf, read_opts, IteratorMode::Start),
         ParsedIteratorMode::End => db.iterator_cf_opt(cf, read_opts, IteratorMode::End),
-        ParsedIteratorMode::From { ref key, dir } => db.iterator_cf_opt(cf, read_opts, IteratorMode::From(key.as_slice(), dir)),
+        ParsedIteratorMode::From { ref key, dir } => {
+            db.iterator_cf_opt(cf, read_opts, IteratorMode::From(key.as_slice(), dir))
+        }
     };
 
     let static_iter: DBIterator<'static> = unsafe { std::mem::transmute(db_iter) };
-    let resource = ResourceArc::new(IteratorResource { iter: Mutex::new(static_iter) });
+    let resource = ResourceArc::new(IteratorResource {
+        iter: Mutex::new(static_iter),
+    });
     Ok(resource)
 }
 
@@ -333,7 +331,7 @@ fn iterator_2(env: Env, opts: Term, cf_name: String) -> NifResult<ResourceArc<It
 #[rustler::nif(name = "iterator_next")]
 fn iterator_next<'a>(env: Env<'a>, iter_res: ResourceArc<IteratorResource>) -> NifResult<Term<'a>> {
     let iter = &mut *iter_res.iter.lock().unwrap();
- 
+
     // Call next() and handle its rich return type directly.
     match iter.next() {
         // Case 1: Successfully got the next key-value pair.
@@ -348,41 +346,43 @@ fn iterator_next<'a>(env: Env<'a>, iter_res: ResourceArc<IteratorResource>) -> N
             let ok_atom = atoms::ok().encode(env);
             let key_term = key_binary.release(env).encode(env);
             let value_term = value_binary.release(env).encode(env);
-            
+
             let data_tuple = rustler::types::tuple::make_tuple(env, &[key_term, value_term]);
-            Ok(rustler::types::tuple::make_tuple(env, &[ok_atom, data_tuple]))
+            Ok(rustler::types::tuple::make_tuple(
+                env,
+                &[ok_atom, data_tuple],
+            ))
         }
         // Case 2: An error occurred during iteration.
-        Some(Err(e)) => {
-            Err(Error::Term(Box::new(format!("RocksDB iteration error: {}", e))))
-        }
+        Some(Err(e)) => Err(Error::Term(Box::new(format!(
+            "RocksDB iteration error: {}",
+            e
+        )))),
         // Case 3: The iterator reached the end.
-        None => {
-            Ok(atoms::finished().encode(env))
-        }
+        None => Ok(atoms::finished().encode(env)),
     }
 }
 
 #[rustler::nif(name = "flush_3")]
-fn flush_3(_opts: Term, _wait: bool)
-    -> NifResult<bool>
-{
+fn flush_3(_opts: Term, _wait: bool) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 #[rustler::nif(name = "compact_range_5")]
-fn compact_range_5(_start: Term, _end: Term, _opts: Term, _cf: String, _output_level: i32)
-    -> NifResult<bool>
-{
+fn compact_range_5(
+    _start: Term,
+    _end: Term,
+    _opts: Term,
+    _cf: String,
+    _output_level: i32,
+) -> NifResult<bool> {
     Err(Error::Atom("not_implemented"))
 }
 
 fn load(env: Env, _: Term) -> bool {
-     let _ = rustler::resource!(IteratorResource, env);
-     true
+    let _ = rustler::resource!(IteratorResource, env);
+    true
 }
 
 // ---------- Rustler exports ----------
 rustler::init!("Elixir.RustlerRocksDB", load = load);
-
-
