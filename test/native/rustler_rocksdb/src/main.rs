@@ -1,63 +1,78 @@
 use rocksdb::{DB, IteratorMode, Options};
 use std::env;
 
-/// A simple command-line tool to list key names and value sizes from a RocksDB database.
+/// A command-line tool to list all column families and their contents in a RocksDB database.
 fn main() {
     // --- 1. Parse Command-Line Arguments ---
-    // Collect command-line arguments into a vector of strings.
     let args: Vec<String> = env::args().collect();
-
-    // Check if the user provided a path to the database.
-    // The first argument (`args[0]`) is the program's own name.
     if args.len() < 2 {
-        // Print a usage message to standard error and exit.
         eprintln!("Usage: {} <path-to-rocksdb>", args[0]);
         std::process::exit(1);
     }
-    // The second argument (`args[1]`) is the database path.
     let db_path = &args[1];
+    println!("Inspecting database at: {}", db_path);
 
-    println!("Attempting to open database at: {}", db_path);
+    // --- 2. List Available Column Families ---
+    // Before we can open the DB, we must know the names of all column families.
+    // `DB::list_cf` inspects the DB files on disk without fully opening the database.
+    let cf_names = match DB::list_cf(&Options::default(), db_path) {
+        Ok(names) => {
+            println!("\nFound {} column families:", names.len());
+            // Print each discovered column family name.
+            for name in &names {
+                println!("  - {}", name);
+            }
+            names
+        }
+        Err(e) => {
+            eprintln!("Failed to list column families: {}.", e);
+            eprintln!("Please ensure the path is correct and the database is valid.");
+            std::process::exit(1);
+        }
+    };
 
-    // --- 2. Open the Database ---
-    // It's good practice to open the database in read-only mode if you don't intend to write.
-    // This prevents accidental modification and can be safer.
+    // --- 3. Open the Database with All Column Families ---
+    // Now we open the database using `open_cf_for_read_only`, providing the list of
+    // column family names we just discovered.
     let opts = Options::default();
-    match DB::open_for_read_only(&opts, db_path, false) {
+    match DB::open_cf_for_read_only(&opts, db_path, &cf_names, false) {
         Ok(db) => {
-            // --- 3. Iterate and Print ---
-            println!("Database opened successfully. Listing key -> value size:");
-            println!("-------------------------------------------------------");
+            println!("\nDatabase opened successfully. Listing contents...");
 
-            // Create an iterator starting from the first key.
-            // The `iterator` method returns an iterator that yields `Result<(key, value), Error>`.
-            let iter = db.iterator(IteratorMode::Start);
+            // --- 4. Iterate Through Each Column Family ---
+            for cf_name in &cf_names {
+                println!("\n--- Contents of Column Family: '{}' ---", cf_name);
 
-            for item in iter {
-                match item {
-                    // The item is a Result, which we need to unwrap.
-                    Ok((key, value)) => {
-                        // `key` and `value` are of type Box<[u8]>.
-                        // We use `from_utf8_lossy` to safely convert the key to a string,
-                        // even if it contains invalid UTF-8 characters.
-                        let key_str = String::from_utf8_lossy(&key);
-                        let value_size = value.len();
+                // To iterate over a specific CF, we first need a "handle" to it.
+                // We can unwrap here because we are guaranteed the handle exists,
+                // as we successfully opened the DB with this CF name.
+                let cf_handle = db.cf_handle(cf_name).unwrap();
 
-                        // Print the key (using debug format for safety) and the value's length.
-                        println!("Key: {:?} -> Value Size: {} bytes", key_str, value_size);
+                // Create an iterator for this specific column family using `iterator_cf`.
+                let iter = db.iterator_cf(&cf_handle, IteratorMode::Start);
+                let mut count = 0;
+
+                for item in iter {
+                    match item {
+                        Ok((key, value)) => {
+                            let key_str = String::from_utf8_lossy(&key);
+                            let value_size = value.len();
+                            println!("  Key: {:?} -> Value Size: {} bytes", key_str, value_size);
+                            count += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("  Error during iteration in CF '{}': {}", cf_name, e);
+                            break;
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("Error during iteration: {}", e);
-                        // Stop iterating if an error occurs.
-                        break;
-                    }
+                }
+                if count == 0 {
+                    println!("  (This column family is empty)");
                 }
             }
         }
         Err(e) => {
-            // Handle the case where the database could not be opened.
-            eprintln!("Failed to open database at '{}': {}", db_path, e);
-            eprintln!("Please ensure the path is correct and the database exists.");
+            eprintln!("Failed to open database with column families: {}", e);
             std::process::exit(1);
         }
     }
