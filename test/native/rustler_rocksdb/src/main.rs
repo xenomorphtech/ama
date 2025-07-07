@@ -44,6 +44,7 @@ fn main() {
                 if cf_name == "default" {
                     continue;
                 }
+
                 println!("\n--- Contents of Column Family: '{}' ---", cf_name);
 
                 // To iterate over a specific CF, we first need a "handle" to it.
@@ -56,6 +57,10 @@ fn main() {
                 let mut count = 0;
 
                 for item in iter {
+                    if count == 1000 {
+                        break;
+                    }
+
                     match item {
                         Ok((key, value)) => {
                             let key_str = String::from_utf8_lossy(&key);
