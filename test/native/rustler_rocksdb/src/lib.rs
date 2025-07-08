@@ -117,6 +117,40 @@ fn get_cf_handle<'a>(db_res: &'a DbResource, cf_name: &'a str) -> NifResult<Arc<
         .ok_or_else(|| Error::Term(Box::new(format!("Column family not found: {}", cf_name))))
 }
 
+/// Opens an `OptimisticTransactionDB` with specified column families and options.
+///
+/// Returns `{:ok, db_resource, list_of_cf_names}`.
+#[rustler::nif]
+fn open_optimistic_transaction_db<'a>(
+    env: Env<'a>,
+    path: String,
+    db_opts_term: Term<'a>,
+    cf_descriptors_term: Term<'a>,
+) -> NifResult<Term<'a>> {
+    let db_opts = parse_db_options(db_opts_term)?;
+
+    let cf_list_iter: ListIterator = cf_descriptors_term.decode()?;
+    let mut cf_descriptors = Vec::new();
+    let mut cf_names = Vec::new();
+
+    for cf_desc_term in cf_list_iter {
+        let (cf_name, cf_opts_term) = cf_desc_term.decode::<(String, Term)>()?;
+        let cf_opts = parse_db_options(cf_opts_term)?;
+        cf_names.push(cf_name.clone());
+        cf_descriptors.push(ColumnFamilyDescriptor::new(cf_name, cf_opts));
+    }
+
+    let path = Path::new(&path);
+    match OptimisticTransactionDB::open_cf_descriptors(&db_opts, path, cf_descriptors) {
+        Ok(db) => {
+            let resource = ResourceArc::new(DbResource { db });
+            let cf_names_term = cf_names.encode(env);
+            Ok((atoms::ok(), resource, cf_names_term).encode(env))
+        }
+        Err(e) => Err(to_nif_err(e)),
+    }
+}
+
 #[rustler::nif]
 fn put_cf(
     db_res: ResourceArc<DbResource>,
